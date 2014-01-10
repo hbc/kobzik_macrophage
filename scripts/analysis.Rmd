@@ -1,0 +1,215 @@
+<!--
+Analysis of anthrax infected cells vs. control cells
+-->
+```{r setup, echo=FALSE}
+opts_chunk$set(tidy=TRUE, highlight=TRUE, fig.align='left', fig.show='hold',
+               cache=FALSE, highlight=TRUE, autodep=TRUE, warning=FALSE, error=FALSE,
+               message=FALSE, prompt=TRUE, comment='', fig.cap='')
+```
+
+# Overview
+Infecting mouse lung macrophages with influenza causes a decrease in
+the antibacterial function of the lungs which bottoms out at D9 but
+improves closer to D11. The group is interested in seeing which sets
+of genes might be involved in that process.
+
+The data is two sets of six replicates of RNA-seq data, one set of six
+samples at D9 and the other six at D11. These samples were barcoded
+and pooled and run in lanes together. Overall two identical lanes were
+run and the reads were combined.
+
+There are two 'experiments' in this dataset which gives it a little
+messier structure than it would have normally: in one experiment, only
+the RNA was extracted and one which had the miRNA and RNA
+extracted. Also for each of the two experiments the RNA was extracted
+on a different day, so there is a little bit of a confound between day
+of extraction and type of extraction. I codified this information in
+the data/macrophage.csv file so we can take it into account during the
+analysis. It is not clear if these were also from the same litter of
+mice as well; at any rate we should expect to see some variation
+across the two groups.
+
+The RNA was extracted from FACS sorted macrophages, I don't know if that
+means they need to do some kind of amplification of the RNA as well or if
+they got enough RNA just from the sort.
+
+They also have qPCR data regarding the regulation of MARCO, a phagocytic
+receptor on the macrophages and have shown there is a large increase
+in D9-D11, so we should see that too.
+
+```{r load-data}
+library(CHBUtils)
+library(edgeR)
+library(HTSFilter)
+library(ggplot2)
+library(gridExtra)
+wd = "/Users/rory/Volumes/odyssh/hsph/projects/kobzik_macrophage"
+setwd(wd)
+metadata_file = "data/macrophage.csv"
+metadata = read.csv(metadata_file, header=TRUE, colClasses="factor")
+
+count_file = "macrophage/final2/131126_macrophage/combined.counts"
+counts = read.table(count_file, header=TRUE, sep="\t")
+colnames(counts) = gsub(".", "_", colnames(counts), fixed=T)
+rownames(counts) = counts$id
+counts$id = NULL
+samples = data.frame(samplename=colnames(counts))
+samples = merge(samples, metadata, by="samplename", sort=FALSE)
+MARCO_ID = "ENSMUSG00000026390"
+```
+
+# Overview
+The MDS plot is kind of all over the place both looking at the day and the extraction,
+but since this isn't cell-line data that kind of variability is not uncommon.
+```{r mds-plot}
+p1 = mds(counts, samples$day)
+p2 = mds(counts, samples$extraction)
+p3 = variance_by_component(counts)
+grid.arrange(p1, p2, p3)
+```
+
+# Design
+We'll use a blocking structure which will take into account the different extraction
+days and protocols.
+```{r design}
+rownames(samples) = samples$samplename
+design = model.matrix(~ 0 + day, data=samples)
+#design = model.matrix(~0 + day + extraction, data=samples)
+design
+```
+
+# Dispersion estimation
+It is useful to look at the variation in the data and make sure it is
+within the bounds we expect and to put some realistic expectation on
+what kind of calls we can make. You can see from the dispersion plot
+that genes with low CPM (counts per million) have a high degree of
+variation-- a small signal with a large variation means that we won't
+be able to make reliable differential calls on most of these genes. A
+common thing people do is to just remove those genes from
+consideration entirely, but I don't like doing that since it is
+possible there is a reliable signal or two lurking there.  As long as
+we keep in mind that those low CPM genes are off in the weeds a bit,
+it is fine.
+
+```{r dispersions}
+y = DGEList(counts = counts)
+y = estimateGLMCommonDisp(y, design)
+y = estimateGLMTrendedDisp(y, design)
+y = estimateGLMTagwiseDisp(y, design)
+bcv(y)
+```
+
+One thing we will do later is to try to cut down on the number of
+genes we are considering for differntial expression. In a single cell,
+somewhere around 1/3 to a half of all possible genes are expressed, so
+that means that there are a low number of genes which all will be
+considered for differential expression but aren't changing because
+they aren't even expressed. We can remove these low count genes via a
+couple of different methods.  The one most people do is to just set a
+threshold of 2-3 log CPM and only consider those genes, which I don't
+like because you throw out some signal.  An alternative method would
+be to keep only genes that could possibly be DE, that is genes which
+are not lowly expressed with a similar expression level across all
+conditions. There is a package to do that which we'll use. You can see
+the effect of what it does by looking at the BCV plot after they are
+removed. A lot of the lowly expressed genes have been removed as well as
+some of the lowly expressed extremely variable genes.
+
+```{r htsfilter-preview}
+bcv(HTSFilter(y)$filteredData)
+```
+
+# Differential expression
+```{r differential-expression}
+fit = glmFit(y, design)
+day9_vs_day11 = makeContrasts(day9_vs_day11=day11-day9, levels=design)
+lrt = glmLRT(fit, contrast=day9_vs_day11)
+topTags(lrt)
+lrt_filt = HTSFilter(lrt, DGEGLM=fit, s.len=25, plot=FALSE)$filteredData
+topTags(lrt_filt)
+```
+
+Unfortunately we aren't picking up anything from this analysis. Since there
+didn't seem to be any systematic differences between the experiment 1 and
+experiment 2 samples, we could try looking at that simpler model.
+
+```{r differential-expression-two-factor}
+design = model.matrix(~0 + day, data=samples)
+design
+y = DGEList(counts = counts)
+y = estimateGLMCommonDisp(y, design)
+y = estimateGLMTrendedDisp(y, design)
+y = estimateGLMTagwiseDisp(y, design)
+bcv(y)
+fit = glmFit(y, design)
+day9_vs_day11 = makeContrasts(day9_vs_day11=day11-day9, levels=design)
+lrt = glmLRT(fit, contrast=day9_vs_day11)
+topTags(lrt)
+lrt_filt = HTSFilter(lrt, DGEGLM=fit, s.len=25, plot=FALSE)$filteredData
+topTags(lrt_filt)
+```
+
+Still nothing is popping out as significant. EdgeR and other count-based methods are not
+the best at identifying DE genes that are expressed in only one condition, so maybe
+voom + limma will be better.
+
+```{r voom}
+library(limma)
+#design = model.matrix(~0 + day + extraction, data=samples)
+design = model.matrix(~day, data=samples)
+nf = calcNormFactors(counts, method = "TMM")
+y = calcNormFactors(y)
+v = voom(y, design, plot=TRUE)
+fit = lmFit(v, design)
+fit = eBayes(fit)
+voom.pvalues = fit$p.value[, 2]
+voom.adjpvalues = p.adjust(voom.pvalues, method = "BH")
+
+
+design = model.matrix(~day, data=samples)
+voom.data = voom(counts, design = design, lib.size = colSums(counts) * nf)
+voom.data$genes = rownames(counts)
+voom.fitlimma = lmFit(voom.data, design = design)
+voom.fitbayes = eBayes(voom.fitlimma)
+voom.pvalues = voom.fitbayes$p.value[, 2]
+voom.adjpvalues = p.adjust(voom.pvalues, method = "BH")
+```
+
+It is still not looking good.
+
+# Why aren't we seeing anything?
+
+The correlations between the samples are lower than we would
+expect. You can see that sample D11_3 looks like an outlier, though
+the scale on the heatmap is a little bit misleading, however the
+correlations between most of the samples are not very good.  That is
+reflected in the coefficient of biological variation plot above.  It
+also has the highest MARCO expression.
+
+```{r correlations}
+library(gplots)
+nc = cpm(y)
+cor(nc)
+heatmap.2(cor(nc), trace="none")
+```
+```{r marco}
+marco_expr = nc[MARCO_ID,]
+marco_expr
+heatmap.2(log(outer(marco_expr, marco_expr, "/")), trace="none")
+```
+If we cluster the samples by MARCO fold change, there are two of the
+six samples from each day which don't cluster with the of the samples
+from their day.  This is similar to the result found when the data was
+analyzed before using FPKM from Cufflinks. The samples that don't
+cluster with MARCO fold change (D9_1, D9_6, D11_1, D11_2)is almost the
+same set of samples which don't cluster properly using all of the
+genes (D9_5, D9_6, D11_1, D11_2), but not quite. I don't really like
+removing samples that don't cluster together and then calling
+differential expression on them, because it is cheating unless you
+have a good reason for it. You are basically saying, I think there are
+systematic differences based on a factor between these samples, let's
+first remove the samples that would make that hypothesis invalid, and
+then test for differential expression. That isn't proper.
+
+In this case having the MARCO marker gives us an independent reason for
+dropping samples if we choose to go that route.
