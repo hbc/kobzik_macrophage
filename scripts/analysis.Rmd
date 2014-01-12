@@ -173,18 +173,22 @@ voom.fitlimma = lmFit(voom.data, design = design)
 voom.fitbayes = eBayes(voom.fitlimma)
 voom.pvalues = voom.fitbayes$p.value[, 2]
 voom.adjpvalues = p.adjust(voom.pvalues, method = "BH")
+head(sort(voom.adjpvalues))
 ```
 
-It is still not looking good.
+It is still not looking good, those are the lowest adjusted p-values from
+voom + limma.
 
 # Why aren't we seeing anything?
 
 The correlations between the samples are lower than we would
 expect. You can see that sample D11_3 looks like an outlier, though
 the scale on the heatmap is a little bit misleading, however the
-correlations between most of the samples are not very good.  That is
-reflected in the coefficient of biological variation plot above.  It
-also has the highest MARCO expression.
+correlations between most of the samples are not very good in general.
+That is reflected in the coefficient of biological variation plot
+above, the common dispersion line (the horizontal line) is higher than normal,
+it should be closer to 0.4 or 0.5 for these types of samples. A heatmap
+of the pairwise correlations of the normalized counts of each sample is below.
 
 ```{r correlations}
 library(gplots)
@@ -192,18 +196,32 @@ nc = cpm(y)
 cor(nc)
 heatmap.2(cor(nc), trace="none")
 ```
+
+If we cluster the samples by MARCO fold change, there are two of the
+six samples from each day which don't cluster with the of the samples
+from their day.
+
 ```{r marco}
 marco_expr = nc[MARCO_ID,]
 marco_expr
 heatmap.2(log(outer(marco_expr, marco_expr, "/")), trace="none")
 ```
-If we cluster the samples by MARCO fold change, there are two of the
-six samples from each day which don't cluster with the of the samples
-from their day.  This is similar to the result found when the data was
+
+Does looking at ACTB fold change show a similar clustering effect? 
+```{r actb}
+actb_expr = nc["ENSMUSG00000029580",]
+heatmap.2(log(outer(actb_expr, expr_expr, "/")), trace="none")
+```
+
+No, and the correlations are much higher, this looks more randomly
+distributed. 
+
+The MARCO clustering is similar to the result found when the data was
 analyzed before using FPKM from Cufflinks. The samples that don't
-cluster with MARCO fold change (D9_1, D9_6, D11_1, D11_2)is almost the
-same set of samples which don't cluster properly using all of the
-genes (D9_5, D9_6, D11_1, D11_2), but not quite. I don't really like
+cluster with MARCO fold change (D9_1, D9_6, D11_1, D11_2) have some
+overlap with the set
+of samples which don't cluster properly using all of the
+genes (D9_6, D11_1, D11_2), but not quite completely overlaping. I don't really like
 removing samples that don't cluster together and then calling
 differential expression on them, because it is cheating unless you
 have a good reason for it. You are basically saying, I think there are
@@ -213,3 +231,109 @@ then test for differential expression. That isn't proper.
 
 In this case having the MARCO marker gives us an independent reason for
 dropping samples if we choose to go that route.
+
+For now let's try using the MARCO expression in the RNA-seq data as a
+factor to consider. We'll rescale the MARCO expression vector so it is
+centered on zero and are in units of SD from zero and add that into the
+experimental design:
+
+```{r marco_center}
+marco_rescale = (marco_expr - mean(marco_expr)) / sd(marco_expr)
+samples$standard_marco = marco_rescale
+samples
+```
+
+And run differential expressing using our rescaled MARCO values as a regressor.
+The way to interpret the log fold change of this are these are the fold change in
+a gene that occurs for each standard deviations MARCO deviates from the mean.
+
+```{r marco-analysis}
+keep = rowSums(cpm(counts)) > 3
+design = model.matrix(~day + marco_rescale, data=samples)
+z = y[keep,]
+z = estimateGLMCommonDisp(z, design)
+z = estimateGLMTrendedDisp(z, design)
+z = estimateGLMTagwiseDisp(z, design)
+fit = glmFit(z, design)
+lrt = glmLRT(fit, coef=3)
+topTags(lrt)
+
+ensembl_gene = "mmusculus_gene_ensembl"
+filter_type = "ensembl_gene_id"
+gene_symbol = "mgi_symbol"
+annotate_df = function(d) {
+	require(biomaRt)
+	ensembl = useMart('ensembl', dataset = ensembl_gene)
+	a = getBM(attributes=c(filter_type, gene_symbol, "description"),
+		filters=c(filter_type), values=d[,"id"],
+		mart=ensembl)
+	m = merge(d, a, by.x='id', by.y=filter_type)
+	return(m)
+}
+tags = topTags(lrt, dim(lrt$fitted.values)[1])$table
+tags$id = rownames(tags)
+tags = annotate_df(tags)
+tags = tags[order(tags$PValue),]
+```
+
+```{r table-output, results='asis'}
+library(googleVis)
+print(gvisTable(head(tags, 100)),  options=list(width=800, height=500)), "chart")
+write.table(tags, file="FC_vs_unit_of_marco_change.tsv", quote=FALSE,
+  sep="\t", row.names=FALSE)
+```
+
+This spits out a promising list of genes, although none are significantly
+different statistically. The table above is supposed to scroll around, but
+something isn't working right with the way Google has been doing it. You might
+have to click in the box and scroll around or possibly use the arrow keys to
+scroll around, I haven't figured out what the bug is. I included the top 100 in
+the table and saved the entire list of genes to the file 'FC_vs_unit_of_marco_change.tsv'.
+
+
+# D9 vs D11 with dropping samples
+For this, lets try dropping the four samples which don't cluster with
+the others in their group looking at MARCO fold change derived from
+the sequencing data (D9_1, D9_6, D11_1, D11_2). That way our group is
+D9 vs D11, looking at only the low MARCO expressors in D9 and the high
+MARCO expressors in D11. Since we already rigged it to be high and low
+MARCO expressors, we'll just use day to run the model.
+
+```{r D9_vs_D11_low_vs_high_only}
+keep_samples = !colnames(z) %in% c("D9_1", "D9_6", "D11_1", "D11_2")
+z = z[,keep_samples]
+z = estimateGLMCommonDisp(z, design)
+z = estimateGLMTrendedDisp(z, design)
+z = estimateGLMTagwiseDisp(z, design)
+design = model.matrix(~day, data=samples[keep_samples,])
+fit = glmFit(z, design)
+lrt = glmLRT(fit)
+topTags(lrt)
+
+ensembl_gene = "mmusculus_gene_ensembl"
+filter_type = "ensembl_gene_id"
+gene_symbol = "mgi_symbol"
+annotate_df = function(d) {
+	require(biomaRt)
+	ensembl = useMart('ensembl', dataset = ensembl_gene)
+	a = getBM(attributes=c(filter_type, gene_symbol, "description"),
+		filters=c(filter_type), values=d[,"id"],
+		mart=ensembl)
+	m = merge(d, a, by.x='id', by.y=filter_type)
+	return(m)
+}
+tags = topTags(lrt, dim(lrt$fitted.values)[1])$table
+tags$id = rownames(tags)
+tags = annotate_df(tags)
+tags = tags[order(tags$PValue),]
+```
+
+
+cluster with MARCO fold change (D9_1, D9_6, D11_1, D11_2)is almost the
+# TODO
+I know this isn't exactly what you were looking for, and I'll do the D9-D11 difference
+too, but  I want to see if we're on the right track before thinking about how to do it.
+Is the key question you want to know what is different between D9 or D11, or is it
+which genes are correlated with high MARCO expression? Not all of the D9 and D11 samples
+have low or high MARCO expression, so to do the day plus MARCO expression, we'll have to
+drop some of the replicates.
