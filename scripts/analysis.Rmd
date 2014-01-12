@@ -210,7 +210,7 @@ heatmap.2(log(outer(marco_expr, marco_expr, "/")), trace="none")
 Does looking at ACTB fold change show a similar clustering effect? 
 ```{r actb}
 actb_expr = nc["ENSMUSG00000029580",]
-heatmap.2(log(outer(actb_expr, expr_expr, "/")), trace="none")
+heatmap.2(log(outer(actb_expr, actb_expr, "/")), trace="none")
 ```
 
 No, and the correlations are much higher, this looks more randomly
@@ -251,6 +251,7 @@ a gene that occurs for each standard deviations MARCO deviates from the mean.
 keep = rowSums(cpm(counts)) > 3
 design = model.matrix(~day + marco_rescale, data=samples)
 z = y[keep,]
+z$samples$lib.size = colSums(z$counts)
 z = estimateGLMCommonDisp(z, design)
 z = estimateGLMTrendedDisp(z, design)
 z = estimateGLMTagwiseDisp(z, design)
@@ -278,7 +279,7 @@ tags = tags[order(tags$PValue),]
 
 ```{r table-output, results='asis'}
 library(googleVis)
-print(gvisTable(head(tags, 100)),  options=list(width=800, height=500)), "chart")
+print(gvisTable(head(tags, 100), options=list(width=800, height=500)), "chart")
 write.table(tags, file="FC_vs_unit_of_marco_change.tsv", quote=FALSE,
   sep="\t", row.names=FALSE)
 ```
@@ -299,16 +300,15 @@ D9 vs D11, looking at only the low MARCO expressors in D9 and the high
 MARCO expressors in D11. Since we already rigged it to be high and low
 MARCO expressors, we'll just use day to run the model.
 
-```{r D9_vs_D11_low_vs_high_only}
+```{r D9_vs_D11_low_vs_high_only, results='asis'}
 keep_samples = !colnames(z) %in% c("D9_1", "D9_6", "D11_1", "D11_2")
+design = model.matrix(~day, data=samples[keep_samples,])
 z = z[,keep_samples]
 z = estimateGLMCommonDisp(z, design)
 z = estimateGLMTrendedDisp(z, design)
 z = estimateGLMTagwiseDisp(z, design)
-design = model.matrix(~day, data=samples[keep_samples,])
 fit = glmFit(z, design)
 lrt = glmLRT(fit)
-topTags(lrt)
 
 ensembl_gene = "mmusculus_gene_ensembl"
 filter_type = "ensembl_gene_id"
@@ -326,14 +326,9 @@ tags = topTags(lrt, dim(lrt$fitted.values)[1])$table
 tags$id = rownames(tags)
 tags = annotate_df(tags)
 tags = tags[order(tags$PValue),]
+library(googleVis)
+print(gvisTable(head(tags, 100), options=list(width=800, height=500)), "chart")
+write.table(tags, file="FC_D9_vs_D11_outliers_dropped.tsv", quote=FALSE,
+  sep="\t", row.names=FALSE)
 ```
-
-
-cluster with MARCO fold change (D9_1, D9_6, D11_1, D11_2)is almost the
-# TODO
-I know this isn't exactly what you were looking for, and I'll do the D9-D11 difference
-too, but  I want to see if we're on the right track before thinking about how to do it.
-Is the key question you want to know what is different between D9 or D11, or is it
-which genes are correlated with high MARCO expression? Not all of the D9 and D11 samples
-have low or high MARCO expression, so to do the day plus MARCO expression, we'll have to
-drop some of the replicates.
+```
